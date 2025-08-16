@@ -357,6 +357,26 @@
                         </table>
                     </div>
                 </div>
+
+                <div class="card">
+                    <h3>Pending Withdrawal Requests</h3>
+                    <p>Approve or reject user withdrawal requests here.</p>
+                     <div style="overflow-x:auto;">
+                        <table id="withdrawal-requests-table">
+                            <thead>
+                                <tr>
+                                    <th>User Email</th>
+                                    <th>Amount (₹)</th>
+                                    <th>Method</th>
+                                    <th>Details</th>
+                                    <th>Timestamp</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -474,6 +494,7 @@
             loadTournaments();
             loadSliders();
             loadWalletTransactions();
+            loadWithdrawalRequests();
         }
 
         // --- TOURNAMENT MANAGEMENT ---
@@ -843,6 +864,7 @@
 
         // --- WALLET VERIFICATION ---
         const walletTableBody = document.querySelector('#wallet-transactions-table tbody');
+        const withdrawalTableBody = document.querySelector('#withdrawal-requests-table tbody');
 
         function loadWalletTransactions() {
             const pendingTxnsRef = ref(db, 'pendingWalletTransactions');
@@ -902,6 +924,100 @@
                     showAlert('Transaction approved and wallet updated!');
                 }).catch((error) => {
                     showAlert('Failed to update wallet: ' + error.message, 'danger');
+                });
+            });
+        };
+
+        function loadWithdrawalRequests() {
+            const pendingWithdrawalsRef = ref(db, 'pendingWithdrawalRequests');
+            onValue(pendingWithdrawalsRef, async (snapshot) => {
+                const data = snapshot.val();
+                withdrawalTableBody.innerHTML = '';
+                if(data) {
+                    for(const [reqId, req] of Object.entries(data)) {
+                        const userSnapshot = await get(ref(db, `users/${req.uid}`));
+                        const userEmail = userSnapshot.val()?.email || 'N/A';
+                        const row = `
+                            <tr>
+                                <td>${userEmail}</td>
+                                <td>₹${req.amount}</td>
+                                <td>${req.method}</td>
+                                <td>${req.details.upiId}</td>
+                                <td>${new Date(req.timestamp).toLocaleString()}</td>
+                                <td class="actions">
+                                    <button class="btn btn-sm btn-success" onclick="approveWithdrawal('${reqId}')">Approve</button>
+                                    <button class="btn btn-sm btn-danger" onclick="rejectWithdrawal('${reqId}')">Reject</button>
+                                </td>
+                            </tr>
+                        `;
+                        withdrawalTableBody.innerHTML += row;
+                    }
+                } else {
+                    withdrawalTableBody.innerHTML = '<tr><td colspan="6">No pending withdrawal requests.</td></tr>';
+                }
+            });
+        }
+
+        window.approveWithdrawal = (reqId) => {
+            showConfirmationModal('Approve Withdrawal', 'Are you sure you want to approve this withdrawal? This action cannot be undone.', () => {
+                const reqRef = ref(db, `pendingWithdrawalRequests/${reqId}`);
+                get(reqRef).then((snapshot) => {
+                    if(!snapshot.exists()) {
+                        showAlert('Request not found or already processed.', 'danger');
+                        return;
+                    }
+                    const reqData = snapshot.val();
+
+                    // Log the transaction for user history
+                    const historyTxnRef = ref(db, `walletTransactions/${reqData.uid}/${reqId}`);
+                    set(historyTxnRef, {
+                        type: 'debit',
+                        amount: reqData.amount,
+                        description: `Withdrawal to ${reqData.method} (${reqData.details.upiId})`,
+                        timestamp: new Date().toISOString(),
+                        status: 'completed'
+                    });
+
+                    // Remove from pending list
+                    remove(reqRef);
+
+                    showAlert('Withdrawal request approved.');
+                });
+            });
+        };
+
+        window.rejectWithdrawal = (reqId) => {
+            showConfirmationModal('Reject Withdrawal', 'Are you sure you want to reject this withdrawal? The funds will be returned to the user.', () => {
+                const reqRef = ref(db, `pendingWithdrawalRequests/${reqId}`);
+                get(reqRef).then((snapshot) => {
+                    if(!snapshot.exists()) {
+                        showAlert('Request not found or already processed.', 'danger');
+                        return;
+                    }
+                    const reqData = snapshot.val();
+                    const userWalletRef = ref(db, `users/${reqData.uid}/walletBalance`);
+
+                    // Use transaction to safely refund the balance
+                    runTransaction(userWalletRef, (currentBalance) => {
+                        return (currentBalance || 0) + reqData.amount;
+                    }).then(() => {
+                        // Log the transaction for user history
+                        const historyTxnRef = ref(db, `walletTransactions/${reqData.uid}/${reqId}`);
+                        set(historyTxnRef, {
+                            type: 'refund',
+                            amount: reqData.amount,
+                            description: `Withdrawal request rejected. Amount refunded.`,
+                            timestamp: new Date().toISOString(),
+                            status: 'rejected'
+                        });
+
+                        // Remove from pending list
+                        remove(reqRef);
+
+                        showAlert('Withdrawal request rejected and funds returned to user.');
+                    }).catch((error) => {
+                        showAlert('Failed to reject withdrawal: ' + error.message, 'danger');
+                    });
                 });
             });
         };
